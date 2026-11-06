@@ -446,6 +446,7 @@ pub struct BackgroundTask {
     backoff_count: u32,
     backoff: Option<Pin<Box<tokio::time::Sleep>>>,
     quitting: bool,
+    no_subscriber: tracing::Dispatch,
     send_task:
         Option<Pin<Box<dyn Future<Output = Result<(), Box<dyn error::Error>>> + Send + 'static>>>,
 }
@@ -484,6 +485,7 @@ impl BackgroundTask {
             backoff_count: 0,
             backoff: None,
             quitting: false,
+            no_subscriber: tracing::Dispatch::new(NoSubscriber::default()),
             send_task: None,
         })
     }
@@ -507,7 +509,8 @@ impl BackgroundTask {
 impl Future for BackgroundTask {
     type Output = ();
     fn poll(mut self: Pin<&mut BackgroundTask>, cx: &mut Context<'_>) -> Poll<()> {
-        let mut default_guard = tracing::subscriber::set_default(NoSubscriber::default());
+        let no_subscriber = self.no_subscriber.clone();
+        let mut default_guard = tracing::dispatcher::set_default(&no_subscriber);
 
         while let Poll::Ready(maybe_maybe_item) = Pin::new(&mut self.receiver).poll_recv(cx) {
             match maybe_maybe_item {
@@ -538,8 +541,7 @@ impl Future for BackgroundTask {
                                 error = %e,
                                 "couldn't send logs to loki",
                             );
-                            default_guard =
-                                tracing::subscriber::set_default(NoSubscriber::default());
+                            default_guard = tracing::dispatcher::set_default(&no_subscriber);
                             if drop_outstanding {
                                 let num_dropped: usize =
                                     self.queues.values_mut().map(|q| q.drop_outstanding()).sum();
@@ -548,8 +550,7 @@ impl Future for BackgroundTask {
                                     num_dropped,
                                     "dropped outstanding messages due to sending errors",
                                 );
-                                default_guard =
-                                    tracing::subscriber::set_default(NoSubscriber::default());
+                                default_guard = tracing::dispatcher::set_default(&no_subscriber);
                             }
                             self.backoff = Some(Box::pin(tokio::time::sleep(backoff_time)));
                             self.backoff_count += 1;
@@ -592,7 +593,7 @@ impl Future for BackgroundTask {
                             .error_for_status()?;
                         Ok(())
                     }
-                    .with_subscriber(NoSubscriber::default()),
+                    .with_subscriber(no_subscriber.clone()),
                 ));
             } else {
                 break;
